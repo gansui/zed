@@ -6,7 +6,7 @@ use gpui::{
     PlatformAtlas, Point, Size,
 };
 use parking_lot::Mutex;
-use std::{borrow::Cow, ops, sync::Arc};
+use std::{borrow::Cow, hash::Hasher, ops, sync::Arc};
 
 use crate::WgpuContext;
 
@@ -120,7 +120,7 @@ impl PlatformAtlas for WgpuAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key) {
+        if let Some(&tile) = lock.tiles_by_key.get(key) {
             // RDP: 每帧复用同一 ImageId, 键始终命中。这里重新 build 拿到新像素,
             // 若与上次哈希不同则原地重传, 避免每帧申请新 tile 导致图集泄漏。
             if let AtlasKey::Image(_) = key {
@@ -132,7 +132,7 @@ impl PlatformAtlas for WgpuAtlas {
                     }
                 }
             }
-            Ok(Some(*tile))
+            Ok(Some(tile))
         } else {
             profiling::scope!("new tile");
             let Some((size, bytes)) = build()? else {

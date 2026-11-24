@@ -1,3 +1,5 @@
+use std::hash::Hasher;
+
 use collections::FxHashMap;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
@@ -88,7 +90,7 @@ impl PlatformAtlas for DirectXAtlas {
         >,
     ) -> anyhow::Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key) {
+        if let Some(&tile) = lock.tiles_by_key.get(key) {
             // RDP: 每帧复用同一 ImageId, 键始终命中。这里重新 build 拿到新像素,
             // 若与上次哈希不同则原地重传, 避免每帧申请新 tile 导致图集泄漏。
             if let AtlasKey::Image(_) = key {
@@ -101,7 +103,7 @@ impl PlatformAtlas for DirectXAtlas {
                     }
                 }
             }
-            Ok(Some(*tile))
+            Ok(Some(tile))
         } else {
             let Some((size, bytes)) = build()? else {
                 return Ok(None);
