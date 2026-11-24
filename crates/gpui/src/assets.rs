@@ -68,6 +68,15 @@ impl RenderImage {
         }
     }
 
+    /// 以指定的 id 构造图片, 便于复用同一图集 tile(如 RDP 每帧更新像素)。
+    pub fn with_id(id: ImageId, data: impl Into<SmallVec<[Frame; 1]>>) -> Self {
+        Self {
+            id,
+            scale_factor: 1.0,
+            data: data.into(),
+        }
+    }
+
     /// Convert this image into a byte slice.
     pub fn as_bytes(&self, frame_index: usize) -> Option<&[u8]> {
         self.data

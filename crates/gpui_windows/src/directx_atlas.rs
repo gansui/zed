@@ -16,6 +16,12 @@ use gpui::{
 
 pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>);
 
+fn fxhash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = collections::FxHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
 struct DirectXAtlasState {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
@@ -23,6 +29,7 @@ struct DirectXAtlasState {
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    image_hashes: FxHashMap<AtlasKey, u64>,
 }
 
 struct DirectXAtlasTexture {
@@ -43,6 +50,7 @@ impl DirectXAtlas {
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
             tiles_by_key: Default::default(),
+            image_hashes: Default::default(),
         }))
     }
 
@@ -66,6 +74,7 @@ impl DirectXAtlas {
         lock.monochrome_textures = AtlasTextureList::default();
         lock.polychrome_textures = AtlasTextureList::default();
         lock.subpixel_textures = AtlasTextureList::default();
+        lock.image_hashes.clear();
         lock.tiles_by_key.clear();
     }
 }
@@ -80,6 +89,18 @@ impl PlatformAtlas for DirectXAtlas {
     ) -> anyhow::Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
+            // RDP: 每帧复用同一 ImageId, 键始终命中。这里重新 build 拿到新像素,
+            // 若与上次哈希不同则原地重传, 避免每帧申请新 tile 导致图集泄漏。
+            if let AtlasKey::Image(_) = key {
+                if let Some((_, bytes)) = build()? {
+                    let hash = fxhash_bytes(&bytes);
+                    if lock.image_hashes.get(key) != Some(&hash) {
+                        let texture = lock.texture(tile.texture_id);
+                        texture.upload(&lock.device_context, tile.bounds, &bytes);
+                        lock.image_hashes.insert(key.clone(), hash);
+                    }
+                }
+            }
             Ok(Some(*tile))
         } else {
             let Some((size, bytes)) = build()? else {
@@ -90,6 +111,7 @@ impl PlatformAtlas for DirectXAtlas {
                 .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
             let texture = lock.texture(tile.texture_id);
             texture.upload(&lock.device_context, tile.bounds, &bytes);
+            lock.image_hashes.insert(key.clone(), fxhash_bytes(&bytes));
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
         }
@@ -98,6 +120,7 @@ impl PlatformAtlas for DirectXAtlas {
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
+        lock.image_hashes.remove(key);
         let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
             return;
         };

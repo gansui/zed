@@ -29,6 +29,12 @@ struct PendingUpload {
     data: Vec<u8>,
 }
 
+fn fxhash_bytes(bytes: &[u8]) -> u64 {
+    let mut hasher = collections::FxHasher::default();
+    hasher.write(bytes);
+    hasher.finish()
+}
+
 struct WgpuAtlasState {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -36,6 +42,7 @@ struct WgpuAtlasState {
     color_texture_format: wgpu::TextureFormat,
     storage: WgpuAtlasStorage,
     tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
+    image_hashes: FxHashMap<AtlasKey, u64>,
     pending_uploads: Vec<PendingUpload>,
 }
 
@@ -57,6 +64,7 @@ impl WgpuAtlas {
             color_texture_format,
             storage: WgpuAtlasStorage::default(),
             tiles_by_key: Default::default(),
+            image_hashes: Default::default(),
             pending_uploads: Vec::new(),
         }))
     }
@@ -86,6 +94,7 @@ impl WgpuAtlas {
     /// Use this for incremental recovery when the device is still valid.
     pub fn clear(&self) {
         let mut lock = self.0.lock();
+        lock.image_hashes.clear();
         lock.storage = WgpuAtlasStorage::default();
         lock.tiles_by_key.clear();
         lock.pending_uploads.clear();
@@ -112,6 +121,17 @@ impl PlatformAtlas for WgpuAtlas {
     ) -> Result<Option<AtlasTile>> {
         let mut lock = self.0.lock();
         if let Some(tile) = lock.tiles_by_key.get(key) {
+            // RDP: 每帧复用同一 ImageId, 键始终命中。这里重新 build 拿到新像素,
+            // 若与上次哈希不同则原地重传, 避免每帧申请新 tile 导致图集泄漏。
+            if let AtlasKey::Image(_) = key {
+                if let Some((_, bytes)) = build()? {
+                    let hash = fxhash_bytes(&bytes);
+                    if lock.image_hashes.get(key) != Some(&hash) {
+                        lock.upload_texture(tile.texture_id, tile.bounds, &bytes);
+                        lock.image_hashes.insert(key.clone(), hash);
+                    }
+                }
+            }
             Ok(Some(*tile))
         } else {
             profiling::scope!("new tile");
@@ -122,6 +142,7 @@ impl PlatformAtlas for WgpuAtlas {
                 .allocate(size, key.texture_kind())
                 .context("failed to allocate")?;
             lock.upload_texture(tile.texture_id, tile.bounds, &bytes);
+            lock.image_hashes.insert(key.clone(), fxhash_bytes(&bytes));
             lock.tiles_by_key.insert(key.clone(), tile);
             Ok(Some(tile))
         }
@@ -130,6 +151,7 @@ impl PlatformAtlas for WgpuAtlas {
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
+        lock.image_hashes.remove(key);
         let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
             return;
         };
